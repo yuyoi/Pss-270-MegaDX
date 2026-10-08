@@ -48,6 +48,8 @@ You need: a **WiFi Mega** board (ATmega2560 + ESP8266), a MIDI shield, an SSD130
 
 ### Wiring (everything 5 V)
 
+<p align="center"><img src="docs/ym2413_pinout.png" width="720" alt="YM2413 pinout with the Arduino Mega pin for every leg"></p>
+
 | Mega | Goes to |
 |---|---|
 | D2 | CPU side of the cut `/CS` jumper (relay input) |
