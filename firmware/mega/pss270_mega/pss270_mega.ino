@@ -455,9 +455,18 @@ void senseTick() {
   unsigned long now = millis();
   if (now - last < 100) return;
   last = now;
-  if (!senseOn) return;
-  senseRaw = analogRead(A0);
-  if (senseRaw < 600) {                                        // below about 2.9 V: PSS is off
+  // Where does "the PSS is off" come from?
+  //  - with the A0 wire (sense on): the PSS 5 V rail, works parked or not
+  //  - without it, in stock mode: the CPU's own /CS line (relayOn), which needs no wire
+  //  - without it, while parked: the CPU is held in reset, its /CS says nothing, so we cannot tell
+  int pssOff;                                                  // 1 off, 0 on, -1 unknown
+  if (senseOn) {
+    senseRaw = analogRead(A0);
+    pssOff = senseRaw < 600 ? 1 : (senseRaw > 700 ? 0 : -1);   // below about 2.9 V = off
+  } else if (!parked) pssOff = relayOn ? 0 : 1;
+  else return;
+  if (pssOff < 0) return;
+  if (pssOff == 1) {
     aliveSince = 0;
     if (!deadSince) deadSince = now;
     if (!pssDead && now - deadSince > 1000) {
@@ -469,7 +478,7 @@ void senseTick() {
       if (oledOk) oled.ssd1306_command(SSD1306_DISPLAYOFF);
       LOG.println(F("standby: screen off, waiting for the PSS"));
     }
-  } else if (senseRaw > 700) {
+  } else {
     deadSince = 0;
     if (!aliveSince) aliveSince = now;
     if (pssDead && now - aliveSince > 300) {

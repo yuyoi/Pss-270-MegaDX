@@ -91,6 +91,7 @@ const int MAXSAVED = 6;
 String savedSsid[MAXSAVED], savedPass[MAXSAVED];
 int nSaved = 0;
 bool apActive = false, forceRetry = false;
+uint32_t minHeap = 0xFFFFFFFF;          // lowest free heap seen since boot, shown at /sys
 
 void loadSaved() {
   nSaved = 0;
@@ -243,6 +244,15 @@ void handleFire() {
   server.send(200, "text/plain", "ok");
 }
 
+// /sys: health numbers, to catch the web-server freeze (heap running out is the main suspect)
+void handleSys() {
+  char b[220];
+  snprintf(b, sizeof b, "uptime_s=%lu\nheap=%u min_heap=%u max_block=%u fragmentation=%u%%\nrssi=%d wifi=%s reset=%s\n",
+           millis() / 1000, ESP.getFreeHeap(), (unsigned)minHeap, ESP.getMaxFreeBlockSize(), ESP.getHeapFragmentation(),
+           WiFi.RSSI(), WiFi.status() == WL_CONNECTED ? "up" : "down", ESP.getResetReason().c_str());
+  server.send(200, "text/plain", b);
+}
+
 String jesc(const String& s) {
   String o;
   for (unsigned i = 0; i < s.length(); i++) {
@@ -335,7 +345,7 @@ let head=0;const L=document.getElementById('log');
 function add(t){if(!t)return;L.textContent+=t;L.scrollTop=L.scrollHeight}
 function c(x){if(x)fetch('/cmd?c='+encodeURIComponent(x))}
 function step(d){const p=document.getElementById('p');p.value=Math.max(0,Math.min(114,+p.value+d));c('prog '+p.value)}
-async function poll(){try{const r=await fetch('/log?from='+head);const h=r.headers.get('X-Log-Head');add(await r.text());if(h)head=+h}catch(e){}setTimeout(poll,500)}
+async function poll(){if(!document.hidden){try{const r=await fetch('/log?from='+head);const h=r.headers.get('X-Log-Head');add(await r.text());if(h)head=+h}catch(e){}}setTimeout(poll,900)}
 poll();
 </script></body></html>)HTML";
 
@@ -391,6 +401,7 @@ void setup() {
   server.on("/cmd", handleCmd);
   server.on("/log", handleLog);
   server.on("/fire", handleFire);
+  server.on("/sys", handleSys);
   server.on("/tone", handleTone);
   server.on("/s.css", handleCss);
   server.on("/wifi", handleWifiPage);
@@ -419,4 +430,8 @@ void loop() {
   while (tcpClient && tcpClient.available()) Serial.write(tcpClient.read());
 
   wifiService();
+
+  uint32_t h = ESP.getFreeHeap();        // safety net: if memory runs out the web server stalls, so restart before that
+  if (h < minHeap) minHeap = h;
+  if (h < 7000) { bootLog("low memory: restarting"); delay(150); ESP.restart(); }
 }

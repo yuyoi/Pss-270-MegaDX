@@ -32,6 +32,7 @@ The tone editor runs on the ESP, so any phone or PC on your WiFi can use it. **D
 | **WiFi** | set up on the `/wifi` page (scan, add, delete), or join `PSS270-setup` if nothing connects |
 | **Updates** | the ESP updates over WiFi, and the Mega updates **through the ESP** (no USB, no reset button) |
 | **Boot** | `boot mega` and it parks itself a moment after the PSS powers on |
+| **Standby** | when the PSS goes off the Mega lets go of the chip pins (no leak into the dead board), blanks the OLED after 20 s (`standby N`), and wakes by itself when the PSS returns |
 
 ## Quick start
 
@@ -61,7 +62,7 @@ You need: a **WiFi Mega** board (ATmega2560 + ESP8266), a MIDI shield, an SSD130
 | even pins 24-52 | the 15 keyboard ribbon leads, **any order** (learn mode sorts them out) |
 | D18 / D19 | MIDI shield TX / RX |
 | D20 / D21 | OLED SDA / SCL |
-| A0 (optional) | PSS +5 V rail through 10k, for power-off detection |
+| A0 (optional) | PSS +5 V rail through 10k. Only needed to notice the PSS switching off while the Mega is parked (in stock mode it notices by itself) |
 
 ### WiFi Mega DIP switches
 
@@ -92,9 +93,11 @@ The Yamaha voice data is **not in this repo**. `pss270_tones.h` is a placeholder
 
 ## Status: work in progress 🚧
 
-Working: keys, MIDI, voices, arpeggiator, menu, tone editor, WiFi setup, WiFi updates, boot mode.
+Working: keys, MIDI, voices, arpeggiator, menu, tone editor, WiFi setup, WiFi updates, boot mode, standby.
 
-Not yet: the PSS **rhythms and auto-accompaniment** (the CPU used to do those), reading the **panel buttons**, the layered/CPU-assisted voices, and a **standby mode that needs one extra wire** (written, untested on hardware).
+Not yet: the PSS **rhythms and auto-accompaniment** (the CPU used to do those), reading the **panel buttons**, and the layered/CPU-assisted voices.
+
+Known issue: the ESP's web server has frozen a few times (it still answers ping, and only a power cycle fixes it). It is not the ESP running out of memory. `/sys` shows its health numbers and there is a low-memory restart, but the cause is still unknown.
 
 ## Legal
 
