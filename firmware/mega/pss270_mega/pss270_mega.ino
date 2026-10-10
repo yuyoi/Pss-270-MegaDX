@@ -102,6 +102,10 @@ Tee LOG;
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 bool oledOk = false;
 bool oledDirty = true;
+unsigned long healUntil = 60000;             // the idle screen refresh only runs for 60 s after the PSS powers on
+unsigned long oledLastInit = 0, keyAt = 0;   // last full OLED re-init, last key press
+int8_t wifiLocal = -1;           // -1 until the ESP says: 1 = Local mode (own WiFi), 0 = WiFi (router)
+char espIp[22] = "";            // the ESP's address, sent by the ESP ('ip ...'), shown on the OLED
 char oledLast[22] = "";      // last key / MIDI event line
 void oledEvent(const char *t) { strncpy(oledLast, t, sizeof oledLast - 1); oledDirty = true; }
 
@@ -192,61 +196,248 @@ void ymReset() {
     if (r <= 7 || r == 0x0E || (r >= 0x10 && r <= 0x18) || (r >= 0x20 && r <= 0x28) || r >= 0x30)
       ymWrite(r, 0);
 }
-void loadUserTone() { for (uint8_t i = 0; i < 8; i++) ymWrite(i, userTone[i]); }
+int16_t swLast2 = -1, swLast3 = -1;   // last tone-sweep register values written (extrasTick)
+void loadUserTone() { for (uint8_t i = 0; i < 8; i++) ymWrite(i, userTone[i]); swLast2 = swLast3 = -1; }
+
+// ---- Mega extras: software parameters on top of the YM2413 (console: 'x list', 'x <name> <value>', 'xsave') ----
+enum { X_VIB, X_VIBR, X_DLY, X_TREM, X_TREMR, X_PEN, X_PENT, X_GL, X_EA, X_ED, X_ES, X_ER, X_UNI,
+       X_SWT, X_SWD, X_SWR, X_SWS, X_TUN, X_TUNROOT, X_T0, X_T11 = X_T0 + 11,
+       X_HUMP, X_HUMV, X_HUMT, X_CHORD, X_STRUM, X_CH1, X_CH5 = X_CH1 + 4,
+       X_EUN, X_EUK, X_EUR, X_GATE, X_SWING, X_REL,
+       X_FON, X_FCUT, X_FRES, X_FEA, X_FA, X_FD, X_FKT, X_FVEL, X_INT, NX };
+struct XDef { const char *name; int16_t lo, hi, def; };
+const XDef XDEFS[NX] = {
+  {"vib", 0, 100, 0},    {"vibr", 1, 150, 55},  {"dly", 0, 250, 30},
+  {"trem", 0, 8, 0},     {"tremr", 1, 150, 50},
+  {"pen", -2400, 2400, 0}, {"pent", 0, 250, 10}, {"gl", 0, 250, 0},
+  {"ea", 0, 250, 0},     {"ed", 0, 250, 0},     {"es", 0, 15, 0},      {"er", 0, 250, 0},
+  {"uni", 0, 50, 0},
+  {"swt", 0, 2, 0},      {"swd", 0, 63, 12},    {"swr", 1, 150, 20},   {"sws", 0, 3, 0},
+  {"tun", 0, 6, 0},      {"tunroot", 0, 11, 0},
+  {"t0", -100, 100, 0},  {"t1", -100, 100, 0},  {"t2", -100, 100, 0},  {"t3", -100, 100, 0},
+  {"t4", -100, 100, 0},  {"t5", -100, 100, 0},  {"t6", -100, 100, 0},  {"t7", -100, 100, 0},
+  {"t8", -100, 100, 0},  {"t9", -100, 100, 0},  {"t10", -100, 100, 0}, {"t11", -100, 100, 0},
+  {"hump", 0, 40, 0},    {"humv", 0, 60, 0},    {"humt", 0, 80, 0},
+  {"chord", 0, 1, 0},    {"strum", 0, 120, 0},
+  {"ch1", 0, 48, 0},     {"ch2", 0, 48, 0},     {"ch3", 0, 48, 0},     {"ch4", 0, 48, 0},   {"ch5", 0, 48, 0},
+  {"eun", 0, 32, 0},     {"euk", 0, 32, 4},     {"eur", 0, 31, 0},     {"gate", 5, 100, 60}, {"swing", 0, 50, 0},
+  {"rel", 0, 1, 0},
+  {"fon", 0, 1, 0},      {"fcut", 0, 63, 63},   {"fres", 0, 7, 0},     {"fea", 0, 63, 0},
+  {"fa", 0, 250, 0},     {"fd", 0, 250, 20},    {"fkt", 0, 100, 0},    {"fvel", 0, 63, 0},
+  {"int", -24, 24, 0}
+};
+// Units: vib/pen/uni/hump cents, vibr/tremr/swr 0.1 Hz, dly/pent/gl/ea/ed/er 10 ms, es/trem attenuation steps (3 dB),
+// fake filter: fon on/off, fcut cutoff (63 = open), fres resonance (feedback), fea envelope amount, fa/fd envelope attack/decay (10 ms), fkt key tracking %, fvel velocity;
+// int: second voice per note, this many semitones away (12 = octave up, 7 = fifth), together with uni it is a two-voice layer;
+// swt 0 off 1 modulator level 2 feedback, sws 0 sine 1 tri 2 saw 3 random, humt/strum ms, gate/swing percent.
+int16_t xv[NX];
+const int8_t TUNINGS[6][12] PROGMEM = {      // cents against 12-tone equal, relative to the tuning root
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  {0, 12, 4, 16, -14, -2, -10, 2, 14, -16, -4, -12},     // just intonation
+  {0, -10, 4, -6, 8, -2, 10, 2, -8, 6, -4, 10},          // pythagorean
+  {0, -10, -8, -6, -10, -2, -12, -4, -8, -12, -4, -8},   // werckmeister III
+  {0, 0, 0, 0, -50, 0, 0, 0, 0, 0, 0, -50},             // maqam rast (half-flat 3rd and 7th)
+  {0, 0, -50, 0, 0, 0, 0, 0, 0, 0, 0, 0}                 // maqam bayati (half-flat 2nd)
+};
+const char* const TUNING_NAMES[7] = {"12tet", "just", "pyth", "werck", "rast", "bayati", "custom"};
+void applyTuning() { if (xv[X_TUN] < 6) for (uint8_t i = 0; i < 12; i++) xv[X_T0 + i] = (int8_t)pgm_read_byte(&TUNINGS[xv[X_TUN]][i]); }
+#define EE_XMAGIC 302
+#define EE_X      320
+void xDefaults() { for (uint8_t i = 0; i < NX; i++) xv[i] = XDEFS[i].def; applyTuning(); }
+void xSave() {
+  for (uint8_t i = 0; i < NX; i++) { EEPROM.update(EE_X + 2 * i, xv[i] & 0xFF); EEPROM.update(EE_X + 2 * i + 1, (xv[i] >> 8) & 0xFF); }
+  EEPROM.update(EE_XMAGIC, 0x5C);
+}
+void xLoad() {
+  if (EEPROM.read(EE_XMAGIC) != 0x5C) { xDefaults(); return; }
+  for (uint8_t i = 0; i < NX; i++) {
+    int16_t v = (int16_t)(EEPROM.read(EE_X + 2 * i) | (EEPROM.read(EE_X + 2 * i + 1) << 8));
+    xv[i] = constrain(v, XDEFS[i].lo, XDEFS[i].hi);
+  }
+}
 
 // ---- synth ----
-struct Voice { uint8_t note; uint8_t vel; bool on; bool held; uint32_t age; uint16_t fnum; uint8_t block; };
+struct Voice { uint8_t note; uint8_t vel; bool on; bool held; uint32_t age; uint16_t fnum; uint8_t block;
+               uint32_t t0, tRel; int16_t det, glide0; int8_t hum; bool fading; uint8_t relFrom, lastAtt; };
 Voice voices[9];
 uint32_t ageCounter = 0;
 int  bend = 0;          // -8192..8191
+int  modW = 0;          // mod wheel 0-127: adds vibrato
 bool sustain = false;
+int  lastGl = -1;       // previous note, for glide
+uint32_t fT0 = 0; uint8_t fVel = 100; int fNote = 60;   // last note on: starts the filter envelope, sets key tracking and velocity
 
-void calcPitch(uint8_t note, uint16_t &fnum, uint8_t &block) {
-  float f = 440.0f * pow(2.0f, (note - 69 + bend / 4096.0f) / 12.0f);   // +-2 semitones
+void pitchOf(float semis, uint16_t &fnum, uint8_t &block) {
+  float f = 440.0f * pow(2.0f, (semis - 69.0f) / 12.0f);
   for (block = 0; block < 7; block++) {
     float fn = f * (float)(1UL << (19 - block)) / 49716.0f;
     if (fn < 512) { fnum = (uint16_t)(fn + 0.5f); if (fnum > 511) fnum = 511; return; }
   }
   fnum = 511;
 }
+void calcPitch(uint8_t note, uint16_t &fnum, uint8_t &block) { pitchOf(note + bend / 4096.0f, fnum, block); }   // +-2 semitones
 uint8_t instNibble() { return prog >= 100 ? (prog - 99) : 0; }
+bool susBit() { return sustain || xv[X_REL]; }
+int16_t tuneOff(uint8_t note) { return xv[X_T0 + ((note % 12) + 12 - xv[X_TUNROOT]) % 12]; }
+float lfoRamp(uint32_t t) {                      // vibrato / tremolo fade-in after the delay
+  uint32_t dl = (uint32_t)xv[X_DLY] * 10;
+  if (!dl) return 1.0f;
+  if (t < dl) return 0.0f;
+  uint32_t rise = dl < 300 ? dl : 300;
+  float r = (float)(t - dl) / rise;
+  return r > 1.0f ? 1.0f : r;
+}
+// pitch of voice v right now, in semitones: note + tuning + bend + detune + humanize + glide + pitch envelope + vibrato
+float voiceSemis(uint8_t v, uint32_t now) {
+  Voice &vc = voices[v];
+  uint32_t t = now - vc.t0;
+  float c = vc.det + vc.hum;
+  uint32_t gt = (uint32_t)xv[X_GL] * 10;
+  if (gt && t < gt) c += vc.glide0 * (1.0f - (float)t / gt);
+  uint32_t pt = (uint32_t)xv[X_PENT] * 10;
+  if (pt && xv[X_PEN] && t < pt) c += xv[X_PEN] * (1.0f - (float)t / pt);
+  float depth = xv[X_VIB] + modW * 0.4f;
+  if (depth > 0) c += depth * lfoRamp(t) * sinf(6.2831853f * xv[X_VIBR] * 0.1f * (now * 0.001f));
+  return vc.note + tuneOff(vc.note) * 0.01f + bend / 4096.0f + c * 0.01f;
+}
+// attenuation of voice v right now (0 = loudest .. 15): velocity + software ADSR + tremolo, or the soft release
+uint8_t voiceAtten(uint8_t v, uint32_t now) {
+  Voice &vc = voices[v];
+  if (vc.fading) {
+    uint32_t r = (uint32_t)xv[X_ER] * 10, tr = now - vc.tRel;
+    if (!r || tr >= r) return 15;
+    return vc.relFrom + (uint8_t)((long)(15 - vc.relFrom) * tr / r);
+  }
+  int base = (127 - vc.vel) >> 3;
+  uint32_t t = now - vc.t0, a = (uint32_t)xv[X_EA] * 10, d = (uint32_t)xv[X_ED] * 10;
+  int e;
+  if (a && t < a) e = 15 - (int)(15UL * t / a);
+  else {
+    uint32_t td = t - a;
+    e = (d && td < d) ? (int)((uint32_t)xv[X_ES] * td / d) : xv[X_ES];
+  }
+  int tot = base + e;
+  if (xv[X_TREM]) tot += (int)(xv[X_TREM] * lfoRamp(t) * (0.5f + 0.5f * sinf(6.2831853f * xv[X_TREMR] * 0.1f * (now * 0.001f))) + 0.5f);
+  return constrain(tot, 0, 15);
+}
+void writeVol(uint8_t v, uint8_t att) { voices[v].lastAtt = att; ymWrite(0x30 + v, (instNibble() << 4) | att); }
 
 void voiceKey(uint8_t v, bool on) {
   // Same register order the PSS's own CPU uses: key-off with the NEW block/fnum8 first, then
   // fnum low, then the final key-on write. (Changing fnum low while the old block is still set
   // bends the release tail of whatever was sounding.)
-  uint8_t hi = (sustain ? 0x20 : 0) | (voices[v].block << 1) | ((voices[v].fnum >> 8) & 1);
+  uint8_t hi = (susBit() ? 0x20 : 0) | (voices[v].block << 1) | ((voices[v].fnum >> 8) & 1);
   ymWrite(0x20 + v, hi);
   ymWrite(0x10 + v, voices[v].fnum & 0xFF);
   ymWrite(0x20 + v, (on ? 0x10 : 0) | hi);
 }
-void synthNoteOn(uint8_t note, uint8_t vel) {
-  if (!parked) return;
-  if (vel == 0) { synthNoteOff(note); return; }
+int8_t allocVoice() {
   int8_t pick = -1; uint32_t oldest = 0xFFFFFFFF;
   for (uint8_t v = 0; v < 9; v++) if (!voices[v].on && !voices[v].held && voices[v].age < oldest) { oldest = voices[v].age; pick = v; }
   if (pick < 0) for (uint8_t v = 0; v < 9; v++) if (voices[v].age < oldest) { oldest = voices[v].age; pick = v; }
+  return pick;
+}
+void startVoice(uint8_t note, uint8_t vel, int16_t det) {
+  int8_t pick = allocVoice();
+  if (pick < 0) return;
   Voice &vc = voices[pick];
-  if (vc.on || vc.held) voiceKey(pick, false);
-  vc.note = note; vc.vel = vel; vc.on = true; vc.held = false; vc.age = ++ageCounter;
-  calcPitch(note, vc.fnum, vc.block);
-  ymWrite(0x30 + pick, (instNibble() << 4) | ((127 - vel) >> 3));
+  if (vc.on || vc.held || vc.fading) voiceKey(pick, false);
+  vc.note = note; vc.vel = vel; vc.on = true; vc.held = false; vc.fading = false; vc.age = ++ageCounter;
+  vc.t0 = millis(); vc.det = det;
+  vc.hum = xv[X_HUMP] ? (int8_t)random(-xv[X_HUMP], xv[X_HUMP] + 1) : 0;
+  vc.glide0 = (xv[X_GL] && lastGl >= 0) ? constrain((lastGl - note) * 100, -4800, 4800) : 0;
+  pitchOf(voiceSemis(pick, vc.t0), vc.fnum, vc.block);
+  writeVol(pick, voiceAtten(pick, vc.t0));
   voiceKey(pick, true);
+}
+void synthNoteOn(uint8_t note, uint8_t vel) {
+  if (!parked) return;
+  if (vel == 0) { synthNoteOff(note); return; }
+  if (xv[X_UNI] || xv[X_INT]) { startVoice(note, vel, -xv[X_UNI]); startVoice(note, vel, xv[X_UNI] + 100 * xv[X_INT]); }   // two voices: detuned apart and/or an interval apart
+  else startVoice(note, vel, 0);
+  lastGl = note;
+  fT0 = millis(); fVel = vel; fNote = note;
+}
+void releaseVoice(uint8_t v) {                    // end of a note: chip release, or the software release if 'er' is set
+  Voice &vc = voices[v];
+  if (xv[X_ER]) { vc.fading = true; vc.tRel = millis(); vc.relFrom = vc.lastAtt; }
+  else voiceKey(v, false);
 }
 void synthNoteOff(uint8_t note) {
   if (!parked) return;
   for (uint8_t v = 0; v < 9; v++) if (voices[v].on && voices[v].note == note) {
     voices[v].on = false;
-    if (sustain) voices[v].held = true; else voiceKey(v, false);
+    if (sustain) voices[v].held = true; else releaseVoice(v);
   }
 }
 void allOff() {
-  for (uint8_t v = 0; v < 9; v++) { voices[v].on = voices[v].held = false; if (parked) voiceKey(v, false); }
+  for (uint8_t v = 0; v < 9; v++) { voices[v].on = voices[v].held = voices[v].fading = false; if (parked) voiceKey(v, false); }
 }
-void applyBend() {
-  for (uint8_t v = 0; v < 9; v++) if (voices[v].on || voices[v].held) {
-    calcPitch(voices[v].note, voices[v].fnum, voices[v].block);
-    voiceKey(v, true);
+void applyBend() { }     // extrasTick re-reads the bend within 20 ms
+
+// 50 Hz: moves every sounding note's pitch and volume (vibrato, glide, pitch envelope, ADSR, tremolo, bend, tuning)
+// and runs the tone sweep. Register writes are budgeted so the key scan and MIDI never starve.
+void extrasTick() {
+  if (!parked) return;
+  static unsigned long last = 0;
+  unsigned long now = millis();
+  if (now - last < 20) return;
+  last = now;
+  static uint8_t startV = 0;
+  int8_t budget = 8;
+  for (uint8_t i = 0; i < 9; i++) {
+    uint8_t v = (startV + i) % 9;
+    Voice &vc = voices[v];
+    if (!(vc.on || vc.held || vc.fading)) continue;
+    if (vc.fading && (!xv[X_ER] || now - vc.tRel >= (uint32_t)xv[X_ER] * 10)) { vc.fading = false; voiceKey(v, false); budget -= 3; continue; }
+    uint8_t att = voiceAtten(v, now);
+    if (att != vc.lastAtt && budget > 0) { writeVol(v, att); budget--; }
+    uint16_t fn; uint8_t bl;
+    pitchOf(voiceSemis(v, now), fn, bl);
+    if ((fn != vc.fnum || bl != vc.block) && budget > 0) {
+      bool hiChg = bl != vc.block || (fn >> 8) != (vc.fnum >> 8);
+      vc.fnum = fn; vc.block = bl;
+      if (hiChg) { ymWrite(0x20 + v, 0x10 | (susBit() ? 0x20 : 0) | (bl << 1) | ((fn >> 8) & 1)); budget--; }   // key stays on
+      ymWrite(0x10 + v, fn & 0xFF); budget--;
+    }
+  }
+  startV = (startV + 1) % 9;
+
+  // tone modulation: the fake filter and the tone sweep both move the custom tone's modulator level
+  // (brightness) and feedback (bite) through registers 2 and 3
+  static bool modActive = false;
+  if (xv[X_FON] || xv[X_SWT]) {
+    modActive = true;
+    int offTL = 0, offFB = 0;
+    if (xv[X_FON]) {
+      uint32_t t = now - fT0, a = (uint32_t)xv[X_FA] * 10, d = (uint32_t)xv[X_FD] * 10;
+      float lvl;                                       // filter envelope: opens over 'fa', closes over 'fd', per new note
+      if (a && t < a) lvl = (float)t / a;
+      else { uint32_t td = t - a; lvl = (d && td < d) ? 1.0f - (float)td / d : 0.0f; }
+      float off = (63 - xv[X_FCUT]) - xv[X_FEA] * lvl - xv[X_FVEL] * (fVel / 127.0f) - (fNote - 60) * xv[X_FKT] * 0.006f;
+      offTL += (int)(off + (off < 0 ? -0.5f : 0.5f));
+      offFB += xv[X_FRES];
+    }
+    if (xv[X_SWT]) {
+      float cyc = xv[X_SWR] * 0.1f * (now * 0.001f), fr = cyc - floorf(cyc), s;
+      static uint32_t lastCyc = 0xFFFFFFFF; static float rnd = 0;
+      switch (xv[X_SWS]) {
+        case 1: s = 1.0f - 4.0f * fabsf(fr - 0.5f); break;
+        case 2: s = 2.0f * fr - 1.0f; break;
+        case 3: if ((uint32_t)cyc != lastCyc) { lastCyc = (uint32_t)cyc; rnd = random(-1000, 1001) / 1000.0f; } s = rnd; break;
+        default: s = sinf(6.2831853f * fr);
+      }
+      int off = (int)(xv[X_SWD] * s + (s < 0 ? -0.5f : 0.5f));
+      if (xv[X_SWT] == 1) offTL += off; else offFB += off;
+    }
+    int16_t r2 = (userTone[2] & 0xC0) | constrain((userTone[2] & 0x3F) + offTL, 0, 63);
+    int16_t r3 = (userTone[3] & 0xF8) | constrain((userTone[3] & 7) + offFB, 0, 7);
+    if (r2 != swLast2 && budget > 0) { ymWrite(2, r2); swLast2 = r2; budget--; }
+    if (r3 != swLast3 && budget > 0) { ymWrite(3, r3); swLast3 = r3; budget--; }
+  } else if (modActive) {
+    modActive = false;
+    ymWrite(2, userTone[2]); ymWrite(3, userTone[3]);
+    swLast2 = swLast3 = -1;
   }
 }
 void setProgram(uint8_t p) {
@@ -383,18 +574,25 @@ uint8_t  arpPressed = 0;                 // keys physically down
 unsigned long arpNext = 0, arpOffAt = 0;
 uint16_t arpPos = 0;
 
+uint32_t arpStep = 0;                    // 16th-note counter (the euclid pattern runs on it)
+unsigned long arpGrid = 0;               // ideal time of the next step, before swing and humanize
+uint8_t xHeld[16];                       // notes the player holds (before chord expansion)
+bool chordArm = false;                   // 'chord learn': the next chord you hold becomes the stored shape
+unsigned long chordArmAt = 0;
+struct Pend { unsigned long at; uint8_t note, vel; bool used; };
+Pend pend[16];                           // delayed note-ons (strum, humanize)
+
 void arpStopNote() { if (arpSounding >= 0) { synthNoteOff(arpSounding); arpSounding = -1; } }
-void arpClear() { arpStopNote(); arpCount = 0; arpPressed = 0; arpPos = 0; }
-void noteOnUser(uint8_t n, uint8_t v) {
+void arpClear() { arpStopNote(); arpCount = 0; arpPressed = 0; arpPos = 0; arpStep = 0; }
+void baseOn(uint8_t n, uint8_t v) {      // one real note (after chord expansion): into the arp, or straight to the synth
   if (!arpMode) { synthNoteOn(n, v); return; }
-  if (v == 0) return;
   arpPressed++;
   if (arpLatch && arpPressed == 1) { arpStopNote(); arpCount = 0; arpPos = 0; }   // a new chord replaces the latched one
   for (uint8_t i = 0; i < arpCount; i++) if (arpHeld[i] == n) return;
   if (arpCount < ARP_MAX) arpHeld[arpCount++] = n;
-  if (arpCount == 1) arpNext = millis();
+  if (arpCount == 1) { arpNext = arpGrid = millis(); arpStep = 0; }
 }
-void noteOffUser(uint8_t n) {
+void baseOff(uint8_t n) {
   if (!arpMode) { synthNoteOff(n); return; }
   if (arpPressed) arpPressed--;
   if (arpLatch) return;
@@ -405,30 +603,94 @@ void noteOffUser(uint8_t n) {
   }
   if (!arpCount) arpStopNote();
 }
+void pendAdd(unsigned long at, uint8_t n, uint8_t v) {
+  for (uint8_t i = 0; i < 16; i++) if (!pend[i].used) { pend[i].at = at; pend[i].note = n; pend[i].vel = v; pend[i].used = true; return; }
+  baseOn(n, v);
+}
+bool pendCancel(uint8_t n) {             // true if a delayed note-on for n was still waiting
+  bool any = false;
+  for (uint8_t i = 0; i < 16; i++) if (pend[i].used && pend[i].note == n) { pend[i].used = false; any = true; }
+  return any;
+}
+void pendTick() {
+  if (!parked) { for (uint8_t i = 0; i < 16; i++) pend[i].used = false; return; }
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < 16; i++) if (pend[i].used && (long)(now - pend[i].at) >= 0) { pend[i].used = false; baseOn(pend[i].note, pend[i].vel); }
+}
+uint8_t chordNotes(uint8_t n, uint8_t *out) {            // the key plus the stored chord above it
+  out[0] = n; uint8_t c = 1;
+  if (xv[X_CHORD] && !chordArm)
+    for (uint8_t i = 0; i < 5; i++) if (xv[X_CH1 + i] && n + xv[X_CH1 + i] <= 127) out[c++] = n + xv[X_CH1 + i];
+  return c;
+}
+void noteOnUser(uint8_t n, uint8_t v) {
+  if (v == 0) { noteOffUser(n); return; }
+  xHeld[n >> 3] |= 1 << (n & 7);
+  if (xv[X_HUMV]) v = constrain((int)v + (int)random(-xv[X_HUMV], xv[X_HUMV] + 1), 1, 127);
+  uint8_t out[6]; uint8_t c = chordNotes(n, out);
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < c; i++) {
+    unsigned long d = (unsigned long)i * xv[X_STRUM];
+    if (c > 1 && xv[X_HUMT]) d += random(xv[X_HUMT] + 1);
+    if (d) pendAdd(now + d, out[i], v); else baseOn(out[i], v);
+  }
+}
+void noteOffUser(uint8_t n) {
+  xHeld[n >> 3] &= ~(1 << (n & 7));
+  uint8_t out[6]; uint8_t c = chordNotes(n, out);
+  for (uint8_t i = 0; i < c; i++) if (!pendCancel(out[i])) baseOff(out[i]);
+}
+void chordLearnTick() {
+  if (!chordArm) return;
+  static uint8_t lastCnt = 0;
+  uint8_t cnt = 0, notes[8];
+  for (uint8_t n = 0; n < 128; n++) if (xHeld[n >> 3] & (1 << (n & 7))) { if (cnt < 8) notes[cnt] = n; cnt++; }
+  if (cnt != lastCnt) { lastCnt = cnt; chordArmAt = millis(); return; }
+  if (cnt >= 2 && cnt <= 8 && millis() - chordArmAt > 600) {         // same chord held for 0.6 s
+    for (uint8_t i = 0; i < 5; i++) xv[X_CH1 + i] = (i + 1 < cnt && notes[i + 1] - notes[0] <= 48) ? notes[i + 1] - notes[0] : 0;
+    xv[X_CHORD] = 1; chordArm = false; lastCnt = 0;
+    oledEvent("chord learned");
+  }
+}
 void arpTick() {
   if (!parked) return;
   unsigned long now = millis();
   if (arpSounding >= 0 && (long)(now - arpOffAt) >= 0) arpStopNote();
   if (!arpMode || !arpCount || (long)(now - arpNext) < 0) return;
   unsigned long step = 15000UL / arpBpm;                 // 16th notes
-  uint8_t tmp[ARP_MAX];
-  memcpy(tmp, arpHeld, arpCount);
-  if (arpMode != 5)                                      // everything but "as played" runs low to high
-    for (uint8_t a = 1; a < arpCount; a++) { uint8_t k = tmp[a]; int b = a - 1; while (b >= 0 && tmp[b] > k) { tmp[b + 1] = tmp[b]; b--; } tmp[b + 1] = k; }
-  uint16_t total = (uint16_t)arpCount * arpOct, p;
-  switch (arpMode) {
-    case 2: p = total - 1 - (arpPos % total); break;
-    case 3: { uint16_t per = total > 1 ? 2 * total - 2 : 1, q = arpPos % per; p = q < total ? q : per - q; break; }
-    case 4: p = random(total); break;
-    default: p = arpPos % total; break;
+  bool hit = true, accent = false;
+  if (xv[X_EUN] > 0) {                                   // euclidean rhythm: euk hits spread over eun steps, rotated by eur
+    uint16_t i = (arpStep + xv[X_EUR]) % xv[X_EUN];
+    hit = ((uint32_t)i * xv[X_EUK]) % xv[X_EUN] < (uint32_t)xv[X_EUK];
+    accent = (arpStep % xv[X_EUN]) == 0;
   }
-  arpPos++;
-  int n = tmp[p % arpCount] + 12 * (p / arpCount);
-  arpStopNote();
-  if (n <= 127) { synthNoteOn(n, 100); arpSounding = n; }
-  arpOffAt = now + step * 6 / 10;
-  arpNext += step;
-  if ((long)(now - arpNext) > 0) arpNext = now + step;   // fell behind (e.g. a screen redraw): don't burst
+  arpStep++;
+  if (hit) {
+    uint8_t tmp[ARP_MAX];
+    memcpy(tmp, arpHeld, arpCount);
+    if (arpMode != 5)                                    // everything but "as played" runs low to high
+      for (uint8_t a = 1; a < arpCount; a++) { uint8_t k = tmp[a]; int b = a - 1; while (b >= 0 && tmp[b] > k) { tmp[b + 1] = tmp[b]; b--; } tmp[b + 1] = k; }
+    uint16_t total = (uint16_t)arpCount * arpOct, p;
+    switch (arpMode) {
+      case 2: p = total - 1 - (arpPos % total); break;
+      case 3: { uint16_t per = total > 1 ? 2 * total - 2 : 1, q = arpPos % per; p = q < total ? q : per - q; break; }
+      case 4: p = random(total); break;
+      default: p = arpPos % total; break;
+    }
+    arpPos++;
+    int n = tmp[p % arpCount] + 12 * (p / arpCount);
+    int vel = 100 + (accent ? 15 : 0);
+    if (xv[X_HUMV]) vel += random(-xv[X_HUMV], xv[X_HUMV] + 1);
+    arpStopNote();
+    if (n <= 127) { synthNoteOn(n, constrain(vel, 1, 127)); arpSounding = n; }
+    arpOffAt = now + step * xv[X_GATE] / 100;
+  } else arpStopNote();                                  // a rest
+  arpGrid += step;
+  if ((long)(now - arpGrid) > 0) arpGrid = now + step;   // fell behind (e.g. a screen redraw): don't burst
+  unsigned long nx = arpGrid;
+  if (arpStep & 1) nx += step * xv[X_SWING] / 100;       // swing: every second 16th comes late
+  if (xv[X_HUMT]) { long j = random(-xv[X_HUMT], xv[X_HUMT] + 1); nx = (long)(nx + j) < (long)now ? now : nx + j; }
+  arpNext = nx;
 }
 
 // ---- PSS power sense (optional wire: PSS +5V rail -> 10k -> A0) ----
@@ -483,6 +745,7 @@ void senseTick() {
     if (!aliveSince) aliveSince = now;
     if (pssDead && now - aliveSince > 300) {
       pssDead = false;
+      healUntil = now + 60000;
       if (standby) { standby = false; if (oledOk) oled.ssd1306_command(SSD1306_DISPLAYON); }
       oledDirty = true;
       LOG.println(F("PSS power back"));
@@ -493,8 +756,8 @@ void senseTick() {
 // ---- key menu ----
 // Enter/leave: hold the two highest keys for 5 s. Inside: C = left, D = select, E = right
 // (the three lowest white keys). Every change is saved to EEPROM at once.
-#define MENU_ITEMS 11
-const char* const MENU_NAMES[MENU_ITEMS] = {"Voice", "Transpose", "MIDI chan", "MIDI thru", "Boot mode", "Tone lock", "Arp mode", "Arp tempo", "Arp octs", "Arp latch", "Exit menu"};
+#define MENU_ITEMS 12
+const char* const MENU_NAMES[MENU_ITEMS] = {"Voice", "Transpose", "MIDI chan", "MIDI thru", "Boot mode", "Tone lock", "Arp mode", "Arp tempo", "Arp octs", "Arp latch", "WiFi mode", "Exit menu"};
 void menuValue(char *buf, size_t n) {
   switch (menuItem) {
     case 0: if (prog < 100) snprintf(buf, n, "%02u %s", prog, PSS270_VOICES[prog].name); else snprintf(buf, n, "ROM voice %u", prog - 99); break;
@@ -507,6 +770,7 @@ void menuValue(char *buf, size_t n) {
     case 7: snprintf(buf, n, "%u BPM", arpBpm); break;
     case 8: snprintf(buf, n, "%u", arpOct); break;
     case 9: snprintf(buf, n, "%s", arpLatch ? "on" : "off"); break;
+    case 10: snprintf(buf, n, "%s", wifiLocal < 0 ? "..." : (wifiLocal ? "LOCAL (own WiFi)" : "WiFi (router)")); break;
     default: snprintf(buf, n, "press D"); break;
   }
 }
@@ -544,6 +808,7 @@ void menuKey(uint8_t note) {             // a key went down while the menu is op
       case 6: arpMode = (arpMode + 1) % 6; EEPROM.update(EE_ARPMODE, arpMode); arpClear(); break;
       case 8: arpOct = arpOct % 4 + 1; EEPROM.update(EE_ARPOCT, arpOct); break;
       case 9: arpLatch = !arpLatch; EEPROM.update(EE_ARPLATCH, arpLatch ? 1 : 0); arpClear(); break;
+      case 10: if (wifiLocal >= 0) { wifiLocal = !wifiLocal; Serial3.print(wifiLocal ? "@wifi local\n" : "@wifi wifi\n"); } break;   // the ESP switches and sends the address back
       default: menuOpen(false); return;
     }
   }
@@ -579,9 +844,10 @@ void scanTick() {
       if (on) keyDown[n >> 3] |= 1 << (n & 7); else keyDown[n >> 3] &= ~(1 << (n & 7));
       if (menuMode) { if (on) menuKey(n); continue; }
       int pn = n + transpose; if (pn < 0 || pn > 127) continue;
+      if (on) { keyAt = millis(); if (oledOk && !standby && millis() - oledLastInit > 3000) { oledLastInit = millis(); oled.begin(SSD1306_SWITCHCAPVCC, 0x3C); oledDirty = true; } }
       if (on) { noteOnUser(pn, 100); midiOut3(0x90 | midiChan, pn, 100); } else { noteOffUser(pn); midiOut3(0x80 | midiChan, pn, 0); }
       if (printKeys) { LOG.print(on ? F("key on  ") : F("key off ")); LOG.println(n); }
-      if (on && !menuMode) { char t[22]; snprintf(t, sizeof t, "key  %u", n); oledEvent(t); }
+      if (on && !menuMode) { static const char NN[] = "C C#D D#E F F#G G#A A#B "; char t[22]; snprintf(t, sizeof t, "%.2s%d key %d MIDI %d", NN + (pn % 12) * 2, pn / 12 - 1, (int)n - (int)baseNote + 1, pn); oledEvent(t); }
     }
   }
 }
@@ -598,7 +864,12 @@ void midiHandle(uint8_t st, uint8_t a, uint8_t b) {
     case 0xB0:
       if (a == 64) {
         sustain = b >= 64;
-        if (!sustain) for (uint8_t v = 0; v < 9; v++) if (voices[v].held) { voices[v].held = false; if (parked) voiceKey(v, false); }
+        if (!sustain) for (uint8_t v = 0; v < 9; v++) if (voices[v].held) { voices[v].held = false; if (parked) releaseVoice(v); }
+      } else if (a == 1) { modW = b;
+      } else if (a == 74) { xv[X_FON] = 1; xv[X_FCUT] = b / 2;           // CC74 cutoff
+      } else if (a == 71) { xv[X_FON] = 1; xv[X_FRES] = b / 18;          // CC71 resonance
+      } else if (a == 73) { xv[X_EA] = b / 2;                            // CC73 attack
+      } else if (a == 72) { xv[X_ER] = b * 2 > 250 ? 250 : b * 2;        // CC72 release
       } else if (a == 123 || a == 120) allOff();
       break;
   }
@@ -627,12 +898,35 @@ void status(Print &o) {
   o.print(F("learned keys ")); o.println(n);
   if (parked) { o.print(F("CPU /CS edges while parked: ")); o.println(parkedEdges); }
 }
+void xCommand(char *arg, Print &o) {                // x | x list | x <name> | x <name> <value>
+  if (!arg || !strcmp(arg, "list")) {
+    for (uint8_t i = 0; i < NX; i++) {
+      wdt_reset();
+      o.print(XDEFS[i].name); o.print(' '); o.print(xv[i]); o.print(' '); o.print(XDEFS[i].lo); o.print(' '); o.print(XDEFS[i].hi); o.print(' '); o.println(XDEFS[i].def);
+    }
+    return;
+  }
+  char *val = strchr(arg, ' ');
+  if (val) *val++ = 0;
+  for (uint8_t i = 0; i < NX; i++) if (!strcmp(arg, XDEFS[i].name)) {
+    if (val) {
+      xv[i] = constrain(atoi(val), XDEFS[i].lo, XDEFS[i].hi);
+      if (i == X_TUN) applyTuning();
+      else if (i >= X_T0 && i <= X_T11) xv[X_TUN] = 6;         // hand-edited tuning
+    }
+    o.print(XDEFS[i].name); o.print(' '); o.println(xv[i]);
+    return;
+  }
+  o.println(F("? (x list)"));
+}
 void command(char *line, Print &o) {
   if (line[0] == '#') return;                                  // ESP boot log
   for (char *p = line; *p; p++) if ((uint8_t)*p < 0x20 || (uint8_t)*p > 0x7E) return;   // ESP ROM noise
   char *arg = strchr(line, ' ');
   if (arg) *arg++ = 0;
   if (!strcmp(line, "status")) status(o);
+  else if (!strcmp(line, "mode") && arg) { int8_t m = !strcmp(arg, "local"); if (m != wifiLocal) { wifiLocal = m; oledDirty = true; } }
+  else if (!strcmp(line, "ip")) { char t[22]; strncpy(t, arg ? arg : "", sizeof t - 1); t[sizeof t - 1] = 0; if (strcmp(t, espIp)) { strcpy(espIp, t); oledDirty = true; } }
   else if (!strcmp(line, "park")) doPark();
   else if (!strcmp(line, "unpark")) doUnpark();
   else if (!strcmp(line, "learn")) learnStart();
@@ -700,7 +994,7 @@ void command(char *line, Print &o) {
     uint16_t ms = sp ? atoi(sp + 1) : 600;
     if (ms > 3000) ms = 3000;
     synthNoteOn(note, 100);
-    for (uint16_t t = 0; t < ms; t += 50) { wdt_reset(); delay(50); }
+    for (uint16_t t = 0; t < ms; t += 50) { unsigned long e = millis() + 50; while ((long)(millis() - e) < 0) { wdt_reset(); extrasTick(); pendTick(); } }
     synthNoteOff(note);
     o.println(F("ok"));
   }
@@ -715,9 +1009,9 @@ void command(char *line, Print &o) {
     for (uint8_t i = 0; i < count; i++) {
       unsigned long t = millis();
       synthNoteOn(note, 100);
-      while (millis() - t < 600) { wdt_reset(); }
+      while (millis() - t < 600) { wdt_reset(); extrasTick(); }
       synthNoteOff(note);
-      while (millis() - t < per) { wdt_reset(); }
+      while (millis() - t < per) { wdt_reset(); extrasTick(); }
     }
     o.println(F("rep done"));
   }
@@ -732,6 +1026,42 @@ void command(char *line, Print &o) {
   else if (!strcmp(line, "latch") && arg) { arpLatch = !strcmp(arg, "on"); EEPROM.update(EE_ARPLATCH, arpLatch ? 1 : 0); arpClear(); o.println(arpLatch ? F("latch on") : F("latch off")); }
   else if (!strcmp(line, "sense") && arg) { senseOn = !strcmp(arg, "on"); EEPROM.update(EE_SENSE, senseOn ? 1 : 0); o.println(senseOn ? F("PSS power sense ON (needs the 5V wire on A0)") : F("PSS power sense off")); }
   else if (!strcmp(line, "standby") && arg) { standbyAfter = constrain(atoi(arg), 5, 250); EEPROM.update(EE_STANDBY, standbyAfter); o.print(F("standby after ")); o.print(standbyAfter); o.println(F(" s")); }
+  else if (!strcmp(line, "chan") && arg) { midiChan = constrain(atoi(arg), 1, 16) - 1; EEPROM.update(EE_CHAN, midiChan); o.println(F("ok")); }
+  else if (!strcmp(line, "trans") && arg) { transpose = constrain(atoi(arg), -24, 24); EEPROM.update(EE_TRANS, (uint8_t)transpose); o.println(F("ok")); }
+  else if (!strcmp(line, "cfg")) {
+    o.print(F("chan ")); o.println(midiChan + 1);
+    o.print(F("trans ")); o.println((int)transpose);
+    o.print(F("thru ")); o.println(midiThru ? 1 : 0);
+    o.print(F("boot ")); o.println(bootMega ? 1 : 0);
+    o.print(F("lock ")); o.println(lockTone ? 1 : 0);
+    o.print(F("standby ")); o.println(standbyAfter);
+    o.print(F("sense ")); o.println(senseOn ? 1 : 0);
+    o.print(F("prog ")); o.println(prog);
+    o.print(F("arp ")); o.println(arpMode);
+    o.print(F("bpm ")); o.println(arpBpm);
+    o.print(F("arpoct ")); o.println(arpOct);
+    o.print(F("latch ")); o.println(arpLatch ? 1 : 0);
+    o.print(F("parked ")); o.println(parked ? 1 : 0);
+  }
+  else if (!strcmp(line, "x")) { xCommand(arg, o); }
+  else if (!strcmp(line, "xsave")) { xSave(); o.println(F("extras saved")); }
+  else if (!strcmp(line, "xload")) { xLoad(); o.println(F("extras loaded")); }
+  else if (!strcmp(line, "xdef")) { xDefaults(); o.println(F("extras reset to defaults (not saved)")); }
+  else if (!strcmp(line, "tune")) {
+    if (arg) for (uint8_t i = 0; i < 7; i++) if (!strcmp(arg, TUNING_NAMES[i]) || (arg[0] >= '0' && arg[0] <= '6' && atoi(arg) == i)) { xv[X_TUN] = i; applyTuning(); }
+    o.print(F("tuning ")); o.print(TUNING_NAMES[xv[X_TUN]]); o.print(F(" root ")); o.println(xv[X_TUNROOT]);
+    o.println(F("12tet just pyth werck rast bayati | x tunroot 0-11 | x t0..t11 cents = custom"));
+  }
+  else if (!strcmp(line, "chord")) {
+    if (arg && !strcmp(arg, "learn")) { chordArm = true; o.println(F("hold a chord for a second")); }
+    else if (arg && !strcmp(arg, "on")) { xv[X_CHORD] = 1; chordArm = false; o.println(F("chord memory on")); }
+    else if (arg && !strcmp(arg, "off")) { xv[X_CHORD] = 0; chordArm = false; o.println(F("chord memory off")); }
+    else if (arg && !strcmp(arg, "clear")) { for (uint8_t i = 0; i < 5; i++) xv[X_CH1 + i] = 0; xv[X_CHORD] = 0; o.println(F("chord cleared")); }
+    o.print(F("chord ")); o.print(xv[X_CHORD] ? F("on") : F("off")); o.print(chordArm ? F(" (learning)") : F(""));
+    o.print(F("  intervals"));
+    for (uint8_t i = 0; i < 5; i++) { o.print(' '); o.print(xv[X_CH1 + i]); }
+    o.println();
+  }
   else if (!strcmp(line, "menu") && arg) { if (!parked) { o.println(F("park first")); return; } menuOpen(!strcmp(arg, "on")); }
   else if (!strcmp(line, "boot") && arg) {
     bootMega = !strcmp(arg, "mega"); EEPROM.update(EE_BOOT, bootMega ? 1 : 0);
@@ -937,6 +1267,7 @@ void powerTick() {
   if (hi) { lowSince = 0; if (!highSince) highSince = now; } else { highSince = 0; if (!lowSince) lowSince = now; }
   if (relayJustOn) {
     relayJustOn = false;
+    healUntil = now + 60000;
     LOG.println(F("PSS on: relay running"));
     oledDirty = true;
     if (lockTone) { lockPending = true; lockAt = now + 30; }
@@ -951,6 +1282,7 @@ void powerTick() {
     digitalWrite(PIN_CS, HIGH);
     pinMode(PIN_CS, OUTPUT);
     relayOn = true;
+    healUntil = now + 60000;
     LOG.println(F("PSS on: relay running"));
     oledDirty = true;
     if (lockTone) { lockPending = true; lockAt = now + 30; }
@@ -990,6 +1322,7 @@ void oledDraw() {
   oled.setCursor(0, 48);
   oled.print(oledLast);
   oled.setCursor(0, 57);
+  if (espIp[0]) { oled.print(F("WiFi ")); oled.print(espIp); oled.display(); return; }   // the address is what you need when the keyboard is out of reach
   uint8_t n = 0; for (uint8_t d = 0; d < NLEADS; d++) for (uint8_t s2 = 0; s2 < NLEADS; s2++) n += keyNote[d][s2] != 0xFF;
   oled.print(F("keys ")); oled.print(n);
   if (lockTone) oled.print(F("  LOCK"));
@@ -1042,6 +1375,8 @@ void setup() {
   if (!customTone && prog < 100) for (uint8_t i = 0; i < 8; i++) userTone[i] = pgm_read_byte(&PSS270_TONES[prog].t[i]);   // the saved voice number must also bring back its tone
   for (uint8_t d = 0; d < NLEADS; d++) for (uint8_t s = 0; s < NLEADS; s++) keyNote[d][s] = EEPROM.read(EE_MAP + d * NLEADS + s);
   rebuildDrivers();
+  xLoad();
+  randomSeed(analogRead(A8) ^ micros());
 
   EICRB = (EICRB & ~(_BV(ISC41) | _BV(ISC40))) | _BV(ISC40);   // INT4 on any edge
   EIFR = _BV(INTF4);
@@ -1063,6 +1398,8 @@ void loop() {
     Wire.beginTransmission(0x3C);
     if (Wire.endTransmission() == 0) { oledOk = oled.begin(SSD1306_SWITCHCAPVCC, 0x3C); oledDirty = true; }
   }
+  static unsigned long lastHeal = 0;
+  if (oledOk && !standby && (long)(healUntil - millis()) > 0 && millis() - lastHeal > 3000 && millis() - keyAt > 1000) { lastHeal = millis(); oled.ssd1306_command(SSD1306_DISPLAYON); oledDirty = true; }
   if (oledDirty && millis() - lastDraw > 100) { lastDraw = millis(); oledDraw(); }
   if (lockPending && !parked && (long)(millis() - lockAt) >= 0) {
     lockPending = false;
@@ -1080,5 +1417,8 @@ void loop() {
   }
   comboTick();
   arpTick();
+  extrasTick();
+  pendTick();
+  chordLearnTick();
   senseTick();
 }

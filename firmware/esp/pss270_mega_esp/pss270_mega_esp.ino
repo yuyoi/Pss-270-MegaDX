@@ -42,6 +42,20 @@ RF_PRE_INIT() {
   system_phy_set_max_tpw(40);          // 0.25 dBm units, 40 = 10 dBm (max is 82)
 }
 
+// Boot-loop guard: the RTC memory counts boots that did not survive 20 s (brownouts). After two of
+// them the next start is "gentle": radio held off longer, 5 dBm, no blocking join. Reset at 20 s up.
+struct RtcBoot { uint32_t magic; uint32_t count; };
+const uint32_t RTC_MAGIC = 0x50533237;
+bool gentle = false;
+void rtcBootCount() {
+  RtcBoot r;
+  if (!ESP.rtcUserMemoryRead(0, (uint32_t*)&r, sizeof r) || r.magic != RTC_MAGIC) { r.magic = RTC_MAGIC; r.count = 0; }
+  r.count++;
+  ESP.rtcUserMemoryWrite(0, (uint32_t*)&r, sizeof r);
+  gentle = r.count >= 3;
+}
+void rtcBootOk() { RtcBoot r = {RTC_MAGIC, 0}; ESP.rtcUserMemoryWrite(0, (uint32_t*)&r, sizeof r); }
+
 struct Net { const char* ssid; const char* pass; };
 #if __has_include("secrets.h")
 #include "secrets.h"                   // your own fallback networks, see secrets.example.h (never committed)
@@ -63,9 +77,13 @@ size_t logHead = 0;     // total bytes ever written (position = logHead % LOGSZ)
 
 void logByte(char c) { logBuf[logHead % LOGSZ] = c; logHead++; }
 
+void applyWifiMode(bool local);      // defined with the WiFi code below
 void pumpMega() {
+  static char lb[40]; static uint8_t ln = 0;     // lines starting @wifi come from the Mega's key menu
   while (Serial.available()) {
     char c = Serial.read();
+    if (c == '\n') { lb[ln] = 0; if (!strncmp(lb, "@wifi ", 6)) applyWifiMode(!strcmp(lb + 6, "local")); ln = 0; }
+    else if (c != '\r' && ln < sizeof lb - 1) lb[ln++] = c;
     logByte(c);
     if (tcpClient && tcpClient.connected()) tcpClient.write((uint8_t)c);
   }
@@ -79,7 +97,16 @@ String logSince(size_t from) {
   return s;
 }
 
+bool fsOk = false;
+void flog(const char* msg) {           // one line in /boot.txt: "<seconds since boot> <text>"
+  if (!fsOk) return;
+  File f = LittleFS.open("/boot.txt", "a");
+  if (!f) return;
+  f.print(millis() / 1000); f.print(' '); f.println(msg);
+  f.close();
+}
 void bootLog(const char* msg) {
+  flog(msg);
   Serial.print("# "); Serial.println(msg);
   for (const char* p = "# "; *p; p++) logByte(*p);
   for (const char* p = msg; *p; p++) logByte(*p);
@@ -129,44 +156,110 @@ void addSaved(const String& ssid, const String& pass) {   // newest goes first, 
   nSaved++;
   saveSaved();
 }
-int netCount() { return nSaved + NET_COUNT; }
-String netSsid(int i) { return i < nSaved ? savedSsid[i] : String(NETS[i - nSaved].ssid); }
-String netPass(int i) { return i < nSaved ? savedPass[i] : String(NETS[i - nSaved].pass); }
+// Always tried last: a phone hotspot called "pss270" with password "pss270setup". Joining it only needs the
+// radio as a client (low current), so it can set up a new WiFi without the setup network.
+const char HOT_SSID[] = "pss270", HOT_PASS[] = "pss270setup";
+int netCount() { return nSaved + NET_COUNT + 1; }
+String netSsid(int i) { return i < nSaved ? savedSsid[i] : (i - nSaved < NET_COUNT ? String(NETS[i - nSaved].ssid) : String(HOT_SSID)); }
+String netPass(int i) { return i < nSaved ? savedPass[i] : (i - nSaved < NET_COUNT ? String(NETS[i - nSaved].pass) : String(HOT_PASS)); }
 
+bool localMode = false;                // Local: the board's own WiFi only, never looks for a router (saved in /mode.txt)
+void loadMode() { File f = LittleFS.open("/mode.txt", "r"); if (f) { localMode = f.readString().startsWith("local"); f.close(); } }
+void saveMode() { File f = LittleFS.open("/mode.txt", "w"); if (f) { f.print(localMode ? "local" : "wifi"); f.close(); } }
+bool wifiTrying = false;               // wifiService is in the middle of a connection attempt
+unsigned long wifiHoldUntil = 0;       // no new round before this (the setup network was just opened)
+
+const char* wlWhy(int st) {            // what the failed attempt means, in plain words (shown in the log)
+  switch (st) {
+    case WL_NO_SSID_AVAIL: return "network not found (wrong name, or it is 5 GHz only)";
+    case WL_WRONG_PASSWORD: return "wrong password";
+    case WL_CONNECT_FAILED: return "refused (wrong password, or the router is WPA3-only / needs WPA2)";
+    default: return "no answer";
+  }
+}
+
+// The setup network runs ALONE (AP mode): AP+STA with the station side hunting for a missing router
+// scanned channels all the time, which dropped the phone every few seconds and drew the most current.
 void startAP() {
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("PSS270-setup", "pss270setup");
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("PSS270-setup", "pss270setup", 1, 0, 3);     // channel 1, visible, 3 clients max
+  WiFi.setOutputPower(6);                                  // the phone is next to the keyboard: 6 dBm is plenty
+  softap_config cfg;
+  if (wifi_softap_get_config(&cfg)) { cfg.beacon_interval = 400; wifi_softap_set_config(&cfg); }   // 2.5 bursts a second instead of 10
   apActive = true;
-  bootLog("no network: setup WiFi PSS270-setup is on (192.168.4.1/wifi)");
+  wifiTrying = false;
+  wifiHoldUntil = millis() + 120000;
+  bootLog("no network: setup WiFi PSS270-setup is on (password pss270setup, then 192.168.4.1/wifi)");
 }
 void stopAP() {
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
+  WiFi.setOutputPower(gentle ? 5 : 10);
   apActive = false;
   bootLog("setup WiFi off");
 }
 
+// One scan per round, logged in full (names, channel, signal, security) so a router that hides or
+// splits its bands shows up in /bootlog. The scan only ORDERS the known networks (the ones in range
+// first): a network the scan missed is still tried afterwards, because a weak or band-steering router
+// can miss a single scan.
+int txDbm = 10;                        // grows by 3 dBm after each failed attempt, up to 16 (8 in gentle mode)
+uint8_t order[16]; int nOrder = 0;     // known networks in the order they will be tried this round
+bool seenNet[16];
+
+void buildOrder() {
+  int n = WiFi.scanNetworks();
+  char m[96];
+  snprintf(m, sizeof m, "scan: %d network(s)", n < 0 ? 0 : n); bootLog(m);
+  for (int i = 0; i < n && i < 12; i++) {
+    snprintf(m, sizeof m, "  %.20s ch%d %ddBm enc%d", WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i), (int)WiFi.encryptionType(i));
+    bootLog(m);
+  }
+  nOrder = 0;
+  int total = netCount() < 16 ? netCount() : 16;
+  for (int pass = 0; pass < 2; pass++)
+    for (int c = 0; c < total; c++) {
+      bool seen = false;
+      String s = netSsid(c);
+      for (int i = 0; i < n; i++) if (WiFi.SSID(i) == s) seen = true;
+      if (pass == 0 && seen) { order[nOrder] = c; seenNet[nOrder++] = true; }
+      if (pass == 1 && !seen) { order[nOrder] = c; seenNet[nOrder++] = false; }
+    }
+  WiFi.scanDelete();
+}
+unsigned long tryMs(int p) { return seenNet[p] ? 12000UL : 8000UL; }
+void failedAttempt(int p) {            // log why, and ask the radio for a little more power for the next one
+  char m[110]; snprintf(m, sizeof m, "%s: %s", netSsid(order[p]).c_str(), wlWhy(WiFi.status())); bootLog(m);
+  WiFi.disconnect();
+  int cap = gentle ? 8 : 16;
+  if (txDbm < cap) { txDbm = txDbm + 3 > cap ? cap : txDbm + 3; WiFi.setOutputPower(txDbm); snprintf(m, sizeof m, "tx power now %d dBm", txDbm); bootLog(m); }
+}
+
 bool joinWifi() {                      // blocking, used once at boot
-  for (int i = 0; i < netCount(); i++) {
-    String s = netSsid(i);
-    char m[64]; snprintf(m, sizeof m, "trying %s", s.c_str()); bootLog(m);
-    WiFi.begin(s.c_str(), netPass(i).c_str());
+  buildOrder();
+  for (int p = 0; p < nOrder; p++) {
+    String s = netSsid(order[p]);
+    char m[96]; snprintf(m, sizeof m, "trying %s%s", s.c_str(), seenNet[p] ? "" : " (not in the scan)"); bootLog(m);
+    WiFi.begin(s.c_str(), netPass(order[p]).c_str());
     unsigned long start = millis();
-    while (millis() - start < 10000) {
+    while (millis() - start < tryMs(p)) {
       if (WiFi.status() == WL_CONNECTED) return true;
       delay(200);
     }
-    WiFi.disconnect();
+    failedAttempt(p);
   }
   return false;
 }
 
-// Keeps the connection alive without ever blocking the web server: one network at a time,
-// 10 s each; after a full round fails, wait 20 s and start the setup network.
+// Keeps the connection alive without ever blocking the web server: a round scans once, then tries every
+// known network (the ones in range first), 8-12 s each. If none works the setup network (AP only) stays up
+// and the round repeats every minute, but never while somebody is connected to the setup network.
 void wifiService() {
+  if (localMode) return;
   static unsigned long nextTry = 0, tryStart = 0, upSince = 0;
-  static int idx = -1;
-  static bool trying = false, wasUp = false;
+  static int pos = -1;
+  static bool wasUp = false, forceNow = false;
   unsigned long now = millis();
   bool up = WiFi.status() == WL_CONNECTED;
   if (up != wasUp) {
@@ -177,21 +270,33 @@ void wifiService() {
     bootLog(m);
   }
   if (up) {
-    trying = false;
+    wifiTrying = false;
     if (!upSince) upSince = now;
     if (apActive && now - upSince > 60000 && WiFi.softAPgetStationNum() == 0) stopAP();   // online for a minute: the setup network is not needed
     return;
   }
   upSince = 0;
-  if (forceRetry) { forceRetry = false; trying = false; idx = -1; nextTry = 0; }
-  if (!trying) {
-    if (now < nextTry || netCount() == 0) return;
-    idx = (idx + 1) % netCount();
-    WiFi.begin(netSsid(idx).c_str(), netPass(idx).c_str());
-    trying = true; tryStart = now;
-  } else if (now - tryStart > 10000) {
-    trying = false;
-    if (idx >= netCount() - 1) { idx = -1; nextTry = now + 20000; if (!apActive) startAP(); }
+  if (forceRetry) { forceRetry = false; wifiTrying = false; pos = -1; nextTry = 0; forceNow = true; }
+  if (!wifiTrying) {
+    if ((long)(now - nextTry) < 0 || (!forceNow && (long)(now - wifiHoldUntil) < 0)) return;
+    if (apActive) {
+      if (!forceNow && WiFi.softAPgetStationNum() > 0) { nextTry = now + 30000; return; }   // somebody is using the setup network: leave it alone
+      WiFi.mode(WIFI_AP_STA);
+    }
+    forceNow = false;
+    if (pos < 0) buildOrder();
+    if (pos + 1 >= nOrder) {           // round over, nothing worked
+      pos = -1; nextTry = now + 60000;
+      if (apActive) { WiFi.mode(WIFI_AP); WiFi.setOutputPower(6); } else startAP();
+      return;
+    }
+    pos++;
+    WiFi.setOutputPower(txDbm);
+    WiFi.begin(netSsid(order[pos]).c_str(), netPass(order[pos]).c_str());
+    wifiTrying = true; tryStart = now;
+  } else if (now - tryStart > tryMs(pos)) {
+    failedAttempt(pos);
+    wifiTrying = false;
   }
 }
 
@@ -245,11 +350,19 @@ void handleFire() {
 }
 
 // /sys: health numbers, to catch the web-server freeze (heap running out is the main suspect)
+void handleReboot() { server.send(200, "text/plain", "rebooting"); delay(200); ESP.restart(); }
+void handleBootlog() {
+  if (server.arg("clear") == "1") { LittleFS.remove("/boot.txt"); server.send(200, "text/plain", "cleared\n"); return; }
+  File f = LittleFS.open("/boot.txt", "r");
+  if (!f) { server.send(200, "text/plain", "(empty)\n"); return; }
+  server.streamFile(f, "text/plain");
+  f.close();
+}
 void handleSys() {
-  char b[220];
-  snprintf(b, sizeof b, "uptime_s=%lu\nheap=%u min_heap=%u max_block=%u fragmentation=%u%%\nrssi=%d wifi=%s reset=%s\n",
+  char b[260];
+  snprintf(b, sizeof b, "uptime_s=%lu\nheap=%u min_heap=%u max_block=%u fragmentation=%u%%\nrssi=%d wifi=%s reset=%s gentle=%d ap=%d local=%d\n",
            millis() / 1000, ESP.getFreeHeap(), (unsigned)minHeap, ESP.getMaxFreeBlockSize(), ESP.getHeapFragmentation(),
-           WiFi.RSSI(), WiFi.status() == WL_CONNECTED ? "up" : "down", ESP.getResetReason().c_str());
+           WiFi.RSSI(), WiFi.status() == WL_CONNECTED ? "up" : "down", ESP.getResetReason().c_str(), gentle, apActive, localMode);
   server.send(200, "text/plain", b);
 }
 
@@ -269,6 +382,8 @@ void handleWifiList() {
   j += WiFi.status() == WL_CONNECTED ? "true" : "false";
   j += ",\"ssid\":\"" + jesc(WiFi.SSID()) + "\",\"ip\":\"" + WiFi.localIP().toString() + "\",\"rssi\":" + String(WiFi.RSSI());
   j += ",\"ap\":"; j += apActive ? "true" : "false";
+  j += ",\"local\":"; j += localMode ? "true" : "false";
+  j += ",\"clients\":" + String(WiFi.softAPgetStationNum());
   j += ",\"saved\":[";
   for (int i = 0; i < nSaved; i++) { if (i) j += ","; j += "\"" + jesc(savedSsid[i]) + "\""; }
   j += "]}";
@@ -276,6 +391,7 @@ void handleWifiList() {
 }
 
 void handleWifiScan() {                  // blocking for a few seconds; the page shows "scanning..."
+  if (apActive && !wifiTrying) WiFi.mode(WIFI_AP_STA);      // scanning needs the station side
   int n = WiFi.scanNetworks();
   String names[24]; int rssi[24]; bool enc[24]; int m = 0;
   for (int i = 0; i < n && m < 24; i++) {
@@ -287,6 +403,7 @@ void handleWifiScan() {                  // blocking for a few seconds; the page
     names[m] = s; rssi[m] = WiFi.RSSI(i); enc[m] = WiFi.encryptionType(i) != ENC_TYPE_NONE; m++;
   }
   WiFi.scanDelete();
+  if (apActive && !wifiTrying && WiFi.status() != WL_CONNECTED) WiFi.mode(WIFI_AP);   // back to the quiet setup network
   for (int a = 0; a < m; a++) for (int b = a + 1; b < m; b++) if (rssi[b] > rssi[a]) {   // strongest first
     String ts = names[a]; names[a] = names[b]; names[b] = ts;
     int tr = rssi[a]; rssi[a] = rssi[b]; rssi[b] = tr;
@@ -296,6 +413,21 @@ void handleWifiScan() {                  // blocking for a few seconds; the page
   for (int i = 0; i < m; i++) { if (i) j += ","; j += "{\"s\":\"" + jesc(names[i]) + "\",\"r\":" + String(rssi[i]) + ",\"e\":" + (enc[i] ? "1" : "0") + "}"; }
   j += "]";
   server.send(200, "application/json", j);
+}
+
+void handleWifiMode() {                  // POST mode=local|wifi
+  String m = server.arg("mode");
+  if (m != "local" && m != "wifi") { server.send(400, "text/plain", "mode must be local or wifi"); return; }
+  server.send(200, "text/plain", "ok");
+  delay(150);
+  applyWifiMode(m == "local");
+}
+void applyWifiMode(bool wantLocal) {
+  localMode = wantLocal;
+  saveMode();
+  bootLog(wantLocal ? "mode: local" : "mode: wifi");
+  if (wantLocal) startAP();
+  else { if (apActive) stopAP(); forceRetry = true; }
 }
 
 void handleWifiAdd() {
@@ -321,7 +453,7 @@ const char PAGE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf
 #log{background:#0d0d0c;border:1px solid var(--line);border-radius:6px;padding:8px;height:45vh;overflow:auto;white-space:pre-wrap;font:13px monospace;color:var(--cyan)}
 #q{width:60%}
 </style></head><body>
-<h2>PSS-270<a href="/tone">tone editor</a><a href="/wifi">wifi</a></h2>
+<h2>PSS-270<a href="/tone">tone editor</a><a href="/wifi#ext">extras</a><a href="/wifi#kbd">settings</a></h2>
 <div class="row">
 <button class="go" onclick="c('park')">Park (Mega synth)</button>
 <button onclick="c('unpark')">Unpark (stock PSS)</button>
@@ -382,17 +514,29 @@ void setup() {
   Serial.begin(115200);
   delay(50);
   char m[96];
+  fsOk = LittleFS.begin();
+  if (fsOk) { File t = LittleFS.open("/boot.txt", "r"); if (t && t.size() > 12000) { t.close(); LittleFS.remove("/boot.txt"); } else if (t) t.close(); }
   snprintf(m, sizeof m, "boot, last reset: %s", ESP.getResetReason().c_str()); bootLog(m);
-  LittleFS.begin();
+  rtcBootCount();
+  if (gentle) bootLog("gentle start: the last boots did not last (brownout?)");
   loadSaved();
+  loadMode();
   snprintf(m, sizeof m, "%d saved network(s)", nSaved); bootLog(m);
   WiFi.persistent(false);
-  delay(500);                          // let the rail settle before the radio draws anything
-  bootLog("radio on (10 dBm)");
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();              // radio completely off while the rail settles (the Mega boots at the same time)
+  delay(gentle ? 2500 : 1200);
+  WiFi.forceSleepWake();
+  delay(100);
   WiFi.mode(WIFI_STA);
-  WiFi.setOutputPower(10);
+  WiFi.setPhyMode(WIFI_PHY_MODE_11G);  // 11b / 11n bursts draw the most current
+  txDbm = gentle ? 5 : 10;
+  WiFi.setOutputPower(txDbm);
+  WiFi.setAutoReconnect(true);
   WiFi.hostname("pss270");
-  if (!joinWifi()) startAP();          // no network: open the setup WiFi, keep retrying in the background
+  bootLog(gentle ? "radio on (5 dBm, 11g)" : "radio on (10 dBm, 11g)");
+  if (localMode) { bootLog("local mode: own WiFi only"); startAP(); }
+  else if (!gentle && !joinWifi()) startAP();   // no network: the setup WiFi opens alone and stays up
 
   MDNS.begin("pss270");
   ArduinoOTA.setHostname("pss270");
@@ -402,11 +546,14 @@ void setup() {
   server.on("/log", handleLog);
   server.on("/fire", handleFire);
   server.on("/sys", handleSys);
+  server.on("/bootlog", handleBootlog);
+  server.on("/reboot", HTTP_POST, handleReboot);
   server.on("/tone", handleTone);
   server.on("/s.css", handleCss);
   server.on("/wifi", handleWifiPage);
   server.on("/wifi/list", handleWifiList);
   server.on("/wifi/scan", handleWifiScan);
+  server.on("/wifi/mode", HTTP_POST, handleWifiMode);
   server.on("/wifi/add", HTTP_POST, handleWifiAdd);
   server.on("/wifi/del", HTTP_POST, handleWifiDel);
   server.begin();
@@ -430,6 +577,22 @@ void loop() {
   while (tcpClient && tcpClient.available()) Serial.write(tcpClient.read());
 
   wifiService();
+  static unsigned long lastIp = 0;
+  if (millis() - lastIp > 15000) {
+    lastIp = millis();
+    Serial.print(localMode ? "mode local\n" : "mode wifi\n");
+    if (WiFi.status() == WL_CONNECTED) { Serial.print("ip "); Serial.print(WiFi.localIP().toString()); Serial.print('\n'); }
+    else if (apActive) Serial.print("ip AP 192.168.4.1\n");
+    else Serial.print("ip none\n");
+  }
+  static uint8_t beat = 0;
+  static const uint16_t BEATS[] = {5, 10, 20, 40, 90, 300};
+  if (beat < 6 && millis() / 1000 >= BEATS[beat]) {
+    char hb[80]; snprintf(hb, sizeof hb, "alive %us heap %u %s rssi %d", BEATS[beat], ESP.getFreeHeap(), apActive ? "AP" : (WiFi.status() == WL_CONNECTED ? "online" : "no-wifi"), WiFi.RSSI());
+    flog(hb); beat++;
+  }
+  static bool bootOk = false;
+  if (!bootOk && millis() > 20000) { bootOk = true; rtcBootOk(); }
 
   uint32_t h = ESP.getFreeHeap();        // safety net: if memory runs out the web server stalls, so restart before that
   if (h < minHeap) minHeap = h;

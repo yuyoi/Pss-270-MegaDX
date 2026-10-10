@@ -26,10 +26,16 @@ The tone editor runs on the ESP, so any phone or PC on your WiFi can use it. **D
 | **Keys** | all 49 keys, learned once (like the UMR2 setup), 9-note polyphony |
 | **MIDI** | in and out on a MIDI shield, channel 1-16, transpose, optional thru |
 | **Voices** | the 100 PSS voices + the chip's 15 ROM instruments |
-| **Arpeggiator** | up, down, up-down, random, as played, latch, 40-240 BPM, 1-4 octaves |
+| **Arpeggiator** | up, down, up-down, random, as played, latch, 40-240 BPM, 1-4 octaves, **Euclid rhythms**, swing, note length, humanize |
+| **Fake filter** | cutoff, resonance, a filter envelope per note, key tracking and velocity: made from the modulator level and feedback of the one user tone (the chip has no filter) |
+| **Mega extras** | software on top of the chip: vibrato and tremolo with delay, pitch envelope, glide, a software volume ADSR (also on the ROM voices), detune and octave/interval layers, tone sweep (wobble), odd tunings (just, pythagorean, werckmeister, maqam rast and bayati, hand-tuned), chord memory with strum |
+| **MIDI knobs** | mod wheel = vibrato, CC74 cutoff, CC71 resonance, CC73 attack, CC72 release, pedal, pitch bend |
 | **Key menu** | hold the two highest keys for 5 s, then **C** = left, **D** = select, **E** = right. Everything is saved |
 | **Tone editor** | all 8 YM2413 user-tone bytes live: sliders, draggable envelopes, voice loader, hold/play, save |
-| **WiFi** | set up on the `/wifi` page (scan, add, delete), or join `PSS270-setup` if nothing connects |
+| **WiFi** | set up on the settings page (scan, add, delete), or join `PSS270-setup` if nothing connects. It scans first and goes straight to a known network in range |
+| **Local mode** | one tap (web page or the keyboard menu, "WiFi mode") and the board makes its own WiFi `PSS270-setup`: no router needed, open `192.168.4.1` |
+| **OLED address** | the board's web address is shown on the OLED, so you never have to hunt for it |
+| **Settings pages** | Extras, Arp, Keyboard, WiFi mode, Networks, System, all with sliders. The same Extras/Arp/Keyboard sliders also sit under the FM controls on the tone editor |
 | **Updates** | the ESP updates over WiFi, and the Mega updates **through the ESP** (no USB, no reset button) |
 | **Boot** | `boot mega` and it parks itself a moment after the PSS powers on |
 | **Standby** | when the PSS goes off the Mega lets go of the chip pins (no leak into the dead board), blanks the OLED after 20 s (`standby N`), and wakes by itself when the PSS returns |
@@ -44,7 +50,7 @@ You need: a **WiFi Mega** board (ATmega2560 + ESP8266), a MIDI shield, an SSD130
    - Mega: DIP **3+4**, `arduino-cli upload --fqbn arduino:avr:mega:cpu=atmega2560 firmware/mega/pss270_mega`
    - ESP: DIP **5+6+7**, power-cycle, `--fqbn esp8266:esp8266:generic:eesz=4M1M,ResetMethod=ck,baud=115200`. Optionally copy `secrets.example.h` to `secrets.h` first.
 4. **Running mode:** DIP **1+2**, slide switch on **RXD0/TXD0**.
-5. Open `http://pss270.local` (or the IP). Click **Park**, then **Learn keys** and press all 49 keys, lowest to highest. Type `boot mega` in the command box if you want the Mega synth at power-up.
+5. Open the address shown on the OLED (or `http://pss270.local`). Click **Park**, then **Learn keys** and press all 49 keys, lowest to highest. Type `boot mega` in the command box if you want the Mega synth at power-up.
 6. **From now on, update over WiFi:** `firmware/mega/flash_wifi.sh` for the Mega, ArduinoOTA for the ESP.
 
 ### Wiring (everything 5 V)

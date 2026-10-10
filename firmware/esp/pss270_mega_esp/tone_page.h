@@ -15,16 +15,23 @@ canvas{width:100%;max-width:360px;display:block;border-radius:6px;border:1px sol
 #msg{margin-left:8px}
 #hex{font-family:monospace;width:270px}
 </style></head><body>
-<h2>Custom tone<a href="/">console</a><a href="/wifi">wifi</a></h2>
+<h2>Custom tone<a href="/">console</a><a href="/wifi#ext">extras</a><a href="/wifi#kbd">settings</a></h2>
 <div class="row">Load voice <select id="v"></select> <button id="ld" class="alt">Load</button> <button id="cur" class="alt">Read current</button></div>
 <div class="row">Note <select id="n"></select> <button id="hold">Hold</button> <button id="play" class="go">Play 1 s</button> <button id="save" class="go">Save to Mega</button><span id="msg" class="ok"></span></div>
 <div class="row">Bytes <input id="hex" type="text" spellcheck="false"> <button id="ap" class="alt">Apply</button></div>
+<div class="row">Random <button id="rnd" class="go">Randomize</button> <button id="mut" class="alt">Mutate</button> <button id="undo" class="alt">Undo</button>
+<label class="dim"><input type="checkbox" id="lk_mod"> lock modulator</label>
+<label class="dim"><input type="checkbox" id="lk_car"> lock carrier</label>
+<label class="dim"><input type="checkbox" id="lk_glob"> lock global</label>
+<label class="dim"><input type="checkbox" id="autoplay" checked> play after</label></div>
 <div class="cols">
 <div class="col" id="mod"><h3>Modulator</h3><canvas id="em" width="300" height="120"></canvas><div class="dim">drag the gold dots: A attack, D decay and sustain level, R release</div></div>
 <div class="col" id="car"><h3>Carrier</h3><canvas id="ec" width="300" height="120"></canvas><div class="dim">drag the gold dots: A attack, D decay and sustain level, R release</div></div>
 </div>
 <div class="cols" style="margin-top:12px"><div class="col" id="glob"><h3>Global</h3></div></div>
+<iframe id="xf" src="/wifi?embed" title="extras" style="width:100%;border:0;height:1400px;margin-top:10px"></iframe>
 <script>
+window.addEventListener("message", e => { if (e.data && e.data.h) document.getElementById("xf").style.height = (e.data.h + 24) + "px"; });
 // field = [label, byte index, shift, bits]
 const F = {
  mod: [["AM tremolo",0,7,1],["VIB vibrato",0,6,1],["EG sustained",0,5,1],["KSR key-scale rate",0,4,1],["MULT multiple",0,0,4],["KSL level scaling",2,6,2],["TL level (0 = loud)",2,0,6],["AR attack",4,4,4],["DR decay",4,0,4],["SL sustain level",6,4,4],["RR release",6,0,4]],
@@ -140,6 +147,62 @@ $("hold").onclick = () => { held = !held; $("hold").classList.toggle("on", held)
 $("n").onchange = () => { if (held) fetch("/fire?c=hold%20" + $("n").value); };
 $("play").onclick = () => fetch("/fire?c=play%20" + $("n").value + "%201000");
 $("save").onclick = () => { send(); setTimeout(() => { fetch("/fire?c=tonesave"); say("saved on the Mega"); }, 150); };
+// ---- random tones ----
+// Ranges are chosen so a roll is nearly always audible: the carrier always has a fast attack and a
+// sustain level that is not silent, the modulator level is never fully off or fully quiet.
+const hist = [];
+const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const pick = arr => arr[rnd(0, arr.length - 1)];
+const chance = p => Math.random() < p;
+const locked = k => $("lk_" + k).checked;
+function setBy(list, label, v) { const f = list.find(x => x[0].startsWith(label)); if (f) put(f, v); }
+function randomOp(list, isMod) {
+  setBy(list, "AM", chance(0.2) ? 1 : 0);
+  setBy(list, "VIB", chance(0.2) ? 1 : 0);
+  setBy(list, "EG", chance(0.5) ? 1 : 0);
+  setBy(list, "KSR", chance(0.3) ? 1 : 0);
+  setBy(list, "MULT", isMod ? rnd(0, 15) : pick([0, 1, 1, 1, 2, 2, 3, 4, 5, 6, 7]));
+  setBy(list, "KSL", chance(0.7) ? 0 : rnd(1, 3));
+  setBy(list, "AR", isMod ? rnd(6, 15) : rnd(9, 15));
+  setBy(list, "DR", rnd(0, 15));
+  setBy(list, "SL", isMod ? rnd(0, 15) : rnd(0, 12));
+  setBy(list, "RR", rnd(2, 12));
+  if (isMod) setBy(list, "TL", rnd(6, 50));
+}
+function randomGlobal() {
+  setBy(F.glob, "Feedback", pick([0, 0, 1, 2, 3, 3, 4, 5, 6, 7]));
+  setBy(F.glob, "Carrier rectify", chance(0.1) ? 1 : 0);
+  setBy(F.glob, "Modulator rectify", chance(0.1) ? 1 : 0);
+}
+function nudge(list) {
+  list.forEach(f => {
+    const max = (1 << f[3]) - 1;
+    if (f[3] == 1) { if (chance(0.06)) put(f, get(f) ^ 1); }
+    else if (chance(0.4)) put(f, Math.min(max, Math.max(0, get(f) + rnd(-2, 2) * (max > 15 ? 3 : 1))));
+  });
+}
+function afterRandom() {
+  show(); send();
+  setTimeout(() => { if (held) retrig(); else if ($("autoplay").checked) fetch("/fire?c=play%20" + $("n").value + "%20800"); }, 120);
+}
+function snapshot() { hist.push(t.slice()); if (hist.length > 30) hist.shift(); }
+$("rnd").onclick = () => {
+  snapshot();
+  if (!locked("mod")) randomOp(F.mod, true);
+  if (!locked("car")) randomOp(F.car, false);
+  if (!locked("glob")) randomGlobal();
+  afterRandom(); say("randomised");
+};
+$("mut").onclick = () => {
+  snapshot();
+  if (!locked("mod")) nudge(F.mod);
+  if (!locked("car")) nudge(F.car);
+  if (!locked("glob")) nudge(F.glob);
+  if (g3(ENV.car.ar) < 6) p3(ENV.car.ar, 6);   // never let a nudge kill the carrier attack
+  afterRandom(); say("mutated");
+};
+$("undo").onclick = () => { if (hist.length) { t = hist.pop(); show(); send(); setTimeout(retrig, 120); say("undone"); } else say("nothing to undo"); };
+
 fetch("/cmd?c=names").then(r => r.text()).then(txt => {
   txt.split("\n").forEach(line => { const m = /^(\d\d) (.+)$/.exec(line.trim()); if (m) { const o = document.createElement("option"); o.value = +m[1]; o.textContent = m[1] + "  " + m[2]; $("v").appendChild(o); } });
   $("cur").onclick();
