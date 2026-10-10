@@ -13,6 +13,12 @@
 
 The OLED sits behind the panel window (it even matches the cyan of the printed voice list), and the MIDI socket is in the side of the case. The whole thing is a stock PSS-270 on the outside.
 
+## The install
+
+<p align="center"><img src="docs/install_overview.jpg" width="320" alt="the whole install: the Mega on the acrylic next to the keybed, the MIDI and OLED boards, ribbon to the key matrix"> <img src="docs/install_mega_and_ribbon.jpg" width="320" alt="the WiFi Mega, the 15-lead ribbon and the jumpers to the YM2413 area"> <img src="docs/install_midi_and_wiring.jpg" width="320" alt="the MIDI socket in the side of the case"></p>
+
+Left to right: the whole board with the Mega taped to an acrylic sheet beside the keybed, the Mega with the 15-lead ribbon to the key matrix and the jumpers to the chip, and the MIDI socket in the case. It played three live jams in front of an audience.
+
 ## Screenshots
 
 <p align="center"><img src="docs/tone_editor_envelopes.jpg" width="640" alt="the tone editor page with the modulator and carrier envelope graphs"></p>
