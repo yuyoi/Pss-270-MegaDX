@@ -2,10 +2,14 @@
 
 # PSS-270 Mega DX (WIP)
 
+<p align="center"><a href="https://discord.gg/R3CQkFdRtf"><img src="https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white" alt="Join the Discord"></a></p>
+
 **Give a Yamaha PSS-270 a new brain.** An Arduino Mega + ESP8266 takes over the YM2413 FM chip and the keyboard: MIDI in/out, an arpeggiator, a key-driven menu, a **live FM tone editor with draggable envelopes**, and WiFi updates for both chips. The only change to the keyboard is one cut jumper and one reset wire.
 
 > Made by JunkSmithWizard (JSW) together with Claude (Anthropic's AI).
 > JSW: the hardware, the install, the ears, the "this sounds wrong" that found every bug. Claude: most of the code.
+>
+> Questions, hardware reports and ideas: **[Discord](https://discord.gg/R3CQkFdRtf)**.
 
 ## Demo
 
