@@ -62,7 +62,7 @@ You need: a **WiFi Mega** board (ATmega2560 + ESP8266), a MIDI shield, an SSD130
 | MIDI shield | Arduino MIDI shield with IN and OUT (the opto version) | [this one](https://www.aliexpress.com/item/4001106845850.html) |
 | OLED | 0.96" SSD1306 128x64, I2C, 4 pins (address 0x3C) | [this one](https://www.aliexpress.com/item/1005006141235306.html) |
 | 5 V supply | a 5 V buck module (into the Mega's 5V pin, not the barrel jack) | [search](https://www.aliexpress.com/w/wholesale-5v-buck-converter-module.html) |
-| Wires | female Dupont jumper wires, or ribbon cable for the 15 key leads | [jumpers](https://www.aliexpress.com/w/wholesale-dupont-jumper-wire-female.html) / [ribbon](https://www.aliexpress.com/w/wholesale-rainbow-ribbon-cable-1.27mm.html) |
+| Wires | Dupont jumper wires, 15-20 cm, male-to-male and male-to-female (some get their heads cut off and soldered), or ribbon cable for the 15 key leads | [jumpers](https://www.aliexpress.com/item/1005013143016274.html) / [ribbon](https://www.aliexpress.com/w/wholesale-rainbow-ribbon-cable-1.27mm.html) |
 
 These are search links, not affiliate links. Pick a seller with good ratings, and check the photos match (DIP switches on the Mega, SSD1306 on the OLED).
 
