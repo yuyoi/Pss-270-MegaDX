@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yamaha PSS-270 Mod: Mega DX, MIDI + live FM tone editor for the YM2413</title>
+<meta name="description" content="Yamaha PSS-270 (PSS270 PortaSound) mod: an Arduino Mega + ESP8266 takes over the YM2413 FM chip and the keys. MIDI in/out, all 100 voices, arpeggiator, key menu, a live FM tone editor with draggable envelopes on your phone, and WiFi updates. Tested on real hardware, free and open source.">
+<meta name="keywords" content="Yamaha PSS-270, PSS270, PSS-270 mod, PSS-270 MIDI, PortaSound mod, YM2413 mod, OPLL, FM synth mod, Arduino Mega synth, ESP8266, circuit bending, keyboard MIDI mod">
+<link rel="canonical" href="https://yuyoi.github.io/Pss-270-MegaDX/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Yamaha PSS-270 Mod: Mega DX (MIDI + live FM tone editor)">
+<meta property="og:description" content="A new brain for the Yamaha PSS-270: MIDI in/out, arpeggiator, key menu and a live YM2413 FM tone editor on your phone. Tested on real hardware.">
+<meta property="og:url" content="https://yuyoi.github.io/Pss-270-MegaDX/">
+<meta property="og:image" content="https://yuyoi.github.io/Pss-270-MegaDX/tone_editor_on_the_keys.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="hexgirl_icon.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"PSS-270 Mega DX","applicationCategory":"MultimediaApplication","operatingSystem":"Arduino Mega 2560 + ESP8266 inside a Yamaha PSS-270","description":"Mod for the Yamaha PSS-270 PortaSound keyboard: an Arduino Mega + ESP8266 drive the YM2413 FM chip and the keys. MIDI in/out, arpeggiator, key menu, live FM tone editor, WiFi updates.","url":"https://yuyoi.github.io/Pss-270-MegaDX/","codeRepository":"https://github.com/yuyoi/Pss-270-MegaDX","license":"https://opensource.org/licenses/MIT","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+</script>
+<style>
+:root{--bg:#121211;--paper:#1c1b18;--fg:#ebe5d3;--muted:#a39d8a;--rule:#3a382f;--green:#2f9a68;--gold:#a8944a;--lav:#8b8fb3;--cyan:#58d3c8}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#f4f1e8;--paper:#fffdf6;--fg:#1d1c19;--muted:#6a6556;--rule:#d8d2c0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 "Helvetica Neue",Arial,sans-serif}
+.wrap{max-width:920px;margin:0 auto;padding:0 16px}
+header{padding:36px 0 18px;text-align:center}
+header img.badge{width:96px;height:96px;image-rendering:pixelated}
+h1{font-size:2rem;line-height:1.2;margin:14px 0 8px}
+.lede{color:var(--muted);max-width:680px;margin:0 auto}
+.btns{margin:18px 0;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:10px 16px;border-radius:8px;text-decoration:none;font-weight:600}
+.btn.green{background:var(--green);color:#fff}.btn.gold{background:var(--gold);color:#121211}.btn.lav{background:var(--lav);color:#121211}
+img.photo{width:100%;height:auto;border-radius:10px;border:1px solid var(--rule);display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:18px 0}
+figure{margin:0}figcaption{color:var(--muted);font-size:.9rem;margin-top:6px}
+section{padding:22px 0;border-top:1px solid var(--rule)}
+h2{font-size:1.4rem;margin:0 0 10px}
+table{width:100%;border-collapse:collapse;font-size:.95rem}
+td,th{padding:8px 10px;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{color:var(--gold);font-weight:600}
+code{color:var(--cyan)}
+.note{color:var(--muted);font-size:.92rem}
+footer{padding:28px 0 40px;color:var(--muted);font-size:.9rem;text-align:center;border-top:1px solid var(--rule)}
+a{color:var(--cyan)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <img class="badge" src="hexgirl_icon.png" alt="Rosetta badge">
+  <h1>Yamaha PSS-270 mod: PSS-270 Mega DX</h1>
+  <p class="lede">A new brain for the Yamaha PSS-270 (PSS270, PortaSound): an Arduino Mega + ESP8266 takes over the YM2413 FM chip and the keyboard. MIDI in and out, an arpeggiator, a key menu and a live FM tone editor with draggable envelopes on your phone. The only change to the keyboard is one cut jumper and one reset wire.</p>
+  <div class="btns">
+    <a class="btn green" href="https://github.com/yuyoi/Pss-270-MegaDX">Code and build guide on GitHub</a>
+    <a class="btn lav" href="https://discord.gg/R3CQkFdRtf">Discord</a>
+  </div>
+</header>
+
+<img class="photo" src="tone_editor_on_the_keys.jpg" alt="The live FM tone editor on a phone, resting on a Yamaha PSS-270 with the OLED showing CUSTOM TONE">
+
+<section>
+  <h2>What it does (tested on real hardware)</h2>
+  <table>
+    <tr><th>Keys</th><td>all 49 keys learned once, 9-note polyphony</td></tr>
+    <tr><th>MIDI</th><td>in and out on a MIDI shield, channel 1-16, transpose, thru</td></tr>
+    <tr><th>Voices</th><td>the PSS-270's own 100 voices (68 exact, 32 simplified) plus the YM2413's 15 ROM instruments</td></tr>
+    <tr><th>Arpeggiator</th><td>up, down, up-down, random, as played, latch, tempo, 1-4 octaves</td></tr>
+    <tr><th>Key menu</th><td>hold the two highest keys, then the three lowest white keys move and select; settings saved</td></tr>
+    <tr><th>FM tone editor</th><td>every YM2413 custom-tone setting live from a phone: sliders, draggable envelopes, randomize and mutate</td></tr>
+    <tr><th>WiFi</th><td>joins your router, or Local mode (its own WiFi, no router); the address shows on the OLED</td></tr>
+    <tr><th>Updates</th><td>both chips update over WiFi, no USB</td></tr>
+  </table>
+  <p class="note">Played live in three jams in front of an audience.</p>
+</section>
+
+<section>
+  <h2>New in the latest firmware (not all ear-tested yet)</h2>
+  <p>Software features on top of the chip: a fake filter (cutoff, resonance, filter envelope) built from the FM modulator level and feedback, vibrato and tremolo with delay, pitch envelope, glide, a software volume envelope, detune and octave layers, tone sweep, odd tunings (just, pythagorean, werckmeister, maqam rast and bayati), chord memory, a Euclid arpeggiator with swing and humanize, and MIDI knobs for cutoff, resonance, attack and release.</p>
+</section>
+
+<section>
+  <h2>Photos</h2>
+  <div class="grid">
+    <figure><img class="photo" src="tone_editor_envelopes.jpg" alt="Tone editor page with modulator and carrier envelopes"><figcaption>The tone editor: drag the gold dots to shape the FM envelopes.</figcaption></figure>
+    <figure><img class="photo" src="oled_mega_synth.jpg" alt="OLED behind the PSS-270 panel window"><figcaption>The OLED sits behind the original panel window.</figcaption></figure>
+    <figure><img class="photo" src="install_overview.jpg" alt="The Mega install inside the PSS-270"><figcaption>The install: the Mega beside the keybed, ribbon to the key matrix.</figcaption></figure>
+    <figure><img class="photo" src="ym2413_pinout.png" alt="YM2413 pinout with the Arduino Mega pins"><figcaption>YM2413 wiring to the Mega.</figcaption></figure>
+  </div>
+</section>
+
+<section>
+  <h2>Build it</h2>
+  <p>Parts: a WiFi Mega (ATmega2560 + ESP8266), a MIDI shield, a 0.96" SSD1306 OLED, a 5 V supply and jumper wires. The full wiring, the AliExpress parts list and the flashing steps are in the <a href="https://github.com/yuyoi/Pss-270-MegaDX#quick-start">GitHub README</a>.</p>
+  <p class="note">The Yamaha voice data is not included; the repo explains how to fill it in from your own keyboard.</p>
+</section>
+
+<footer>
+  Made by JunkSmithWizard (JSW) with Claude. MIT licensed. Yamaha, PortaSound, PSS-270 and YM2413 are trademarks of Yamaha Corporation; this project is independent and not affiliated with Yamaha.
+</footer>
+</div>
+</body>
+</html>

@@ -1,8 +1,10 @@
 <p align="center"><img src="docs/tone_editor_on_the_keys.jpg" width="560" alt="the live tone editor on a phone, resting on the PSS-270 with the OLED showing CUSTOM TONE"></p>
 
-# PSS-270 Mega DX (WIP)
+# PSS-270 Mega DX: the Yamaha PSS-270 mod (MIDI + live FM tone editor + arpeggiator)
 
 <p align="center"><a href="https://discord.gg/R3CQkFdRtf"><img src="https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white" alt="Join the Discord"></a></p>
+
+*Yamaha PSS-270 / PSS270 / PortaSound PSS-270 mod. Work in progress. Landing page: [yuyoi.github.io/Pss-270-MegaDX](https://yuyoi.github.io/Pss-270-MegaDX/)*
 
 **Give a Yamaha PSS-270 a new brain.** An Arduino Mega + ESP8266 takes over the YM2413 FM chip and the keyboard: MIDI in/out, an arpeggiator, a key-driven menu, a **live FM tone editor with draggable envelopes**, and WiFi updates for both chips. The only change to the keyboard is one cut jumper and one reset wire.
 
