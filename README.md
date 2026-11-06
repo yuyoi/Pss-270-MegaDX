@@ -54,6 +54,18 @@ The tone editor runs on the ESP, so any phone or PC on your WiFi can use it. **D
 
 You need: a **WiFi Mega** board (ATmega2560 + ESP8266), a MIDI shield, an SSD1306 OLED, a 5 V supply, and a PSS-270 you are willing to open.
 
+### Parts (AliExpress)
+
+| Part | What to look for | Link |
+|---|---|---|
+| WiFi Mega | "Mega 2560 + WiFi R3": ATmega2560 and ESP8266 on one board, with the DIP switch block | [search](https://www.aliexpress.com/w/wholesale-mega-2560-wifi-r3-esp8266.html) |
+| MIDI shield | Arduino MIDI shield with IN and OUT (the opto version) | [search](https://www.aliexpress.com/w/wholesale-arduino-midi-shield.html) |
+| OLED | 0.96" SSD1306 128x64, I2C, 4 pins (address 0x3C) | [search](https://www.aliexpress.com/w/wholesale-0.96-oled-ssd1306-i2c-128x64.html) |
+| 5 V supply | a 5 V buck module (into the Mega's 5V pin, not the barrel jack) | [search](https://www.aliexpress.com/w/wholesale-5v-buck-converter-module.html) |
+| Wires | female Dupont jumper wires, or ribbon cable for the 15 key leads | [jumpers](https://www.aliexpress.com/w/wholesale-dupont-jumper-wire-female.html) / [ribbon](https://www.aliexpress.com/w/wholesale-rainbow-ribbon-cable-1.27mm.html) |
+
+These are search links, not affiliate links. Pick a seller with good ratings, and check the photos match (DIP switches on the Mega, SSD1306 on the OLED).
+
 1. **Wire it** (tables below). Cut the CPU-to-chip `/CS` jumper, and add the reset wire to the CPU's reset transistor.
 2. **Power the Mega with 5 V into its 5 V pin.** ⚠ Not the barrel jack: it is unreliable on these clone boards.
 3. **First flash over USB** (Arduino CLI, or the IDE with the same settings).
